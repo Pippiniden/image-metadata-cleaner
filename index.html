@@ -3,232 +3,532 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 外部への通信を一切許可しない（画像が外へ出ないことをブラウザ側でも保証する） -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob:; connect-src 'none'; form-action 'none'; base-uri 'none'">
 <title>画像メタデータ一括削除ツール</title>
 <style>
-:root{color-scheme:light dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
-body{max-width:900px;margin:32px auto;padding:0 18px;line-height:1.6}
+:root{color-scheme:light dark;font-family:system-ui,-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif}
+body{max-width:900px;margin:32px auto;padding:0 18px 48px;line-height:1.6}
 h1{font-size:1.55rem;margin-bottom:6px}
 .sub{color:GrayText;margin-top:0}
 #drop{border:2px dashed #888;border-radius:14px;padding:34px 18px;text-align:center;margin:22px 0;cursor:pointer}
+#drop:focus-visible{outline:3px solid #2684ff;outline-offset:2px}
 #drop.over{border-color:#2684ff;background:color-mix(in srgb,#2684ff 9%,transparent)}
-button,.filelabel{border:1px solid #888;border-radius:8px;padding:9px 14px;background:ButtonFace;color:ButtonText;cursor:pointer}
+button{border:1px solid #888;border-radius:8px;padding:9px 14px;background:ButtonFace;color:ButtonText;cursor:pointer;font:inherit}
+button.primary{border-color:#2684ff;background:#2684ff;color:#fff}
+button.small{padding:3px 9px;font-size:.85em}
 button:disabled{opacity:.45;cursor:not-allowed}
 .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.opts{margin:0 0 14px}
+.opts label{cursor:pointer}
 #list{padding:0;list-style:none}
 #list li{display:flex;gap:12px;align-items:center;border-bottom:1px solid #8885;padding:10px 2px;flex-wrap:wrap}
 .name{flex:1;min-width:180px;overflow-wrap:anywhere}
 .status{color:GrayText;font-size:.9em}
+.warn{color:#d97706;font-weight:600;font-size:.9em}
+.fail{color:#dc2626;font-size:.9em}
+.actions{display:flex;gap:8px;align-items:center}
 a{color:LinkText}
 .note{font-size:.9em;color:GrayText}
 </style>
 </head>
 <body>
 <h1>画像メタデータ一括削除ツール</h1>
-<p class="sub">画像を端末内で処理し、成功した画像をZIPにまとめて1回でダウンロードします。画像データをサーバーへ送信しません。</p>
+<p class="sub">画像を端末内だけで処理し、結果をまとめて保存できます。画像データはどこにも送信されません。</p>
 
 <div id="drop" tabindex="0" role="button" aria-label="画像を選択またはドロップ">
-  <strong>画像をここにドラッグ＆ドロップ</strong><br>
-  またはクリックしてファイルを選択
-  <input id="picker" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple hidden>
+<strong>画像をここにドラッグ＆ドロップ</strong><br>
+またはクリックしてファイルを選択
+<input id="picker" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif" multiple hidden>
+</div>
+
+<div class="opts">
+<label><input type="checkbox" id="keepOri" checked> 写真の向き（Orientation）だけは残す</label>
+<p class="note">EXIFを丸ごと消すと、スマホで縦に撮った写真が横向きに表示されることがあります。これは「向き」だけを残す設定です（撮影日時・機種・位置情報などは残りません）。</p>
 </div>
 
 <div class="controls">
-  <button id="clean" disabled>選択画像を一括処理</button>
-  <button id="clear" disabled>一覧をクリア</button>
+<button id="clean" class="primary" disabled>選択画像を一括処理</button>
+<button id="dl" disabled>結果をダウンロード</button>
+<button id="clear" disabled>一覧をクリア</button>
 </div>
 <ul id="list"></ul>
 <p id="summary" aria-live="polite"></p>
-<p class="note">
-対応形式：JPEG / PNG / WebP。JPEGはEXIF・XMP・Photoshop/IPTC等のメタデータ領域を除去し、圧縮画像データは再圧縮しません。
-PNGはテキスト情報・EXIF・日時等のチャンクを除去し、画像データと色補正情報を保持します。
-WebPはEXIF・XMPチャンクを除去します。ICC色プロファイルは保持します。
-</p>
-<p class="note">
-注意：画像形式に含まれるすべての付加情報を完全に判定できるわけではありません。処理後の画像を必要に応じて確認してください。
-</p>
-<script>
-const picker=document.getElementById('picker'), drop=document.getElementById('drop');
-const list=document.getElementById('list'), cleanBtn=document.getElementById('clean'), clearBtn=document.getElementById('clear');
-const summary=document.getElementById('summary');
-let files=[];
+<noscript><p class="fail">このツールはJavaScriptが必要です。</p></noscript>
 
-function addFiles(incoming){
-  for(const f of incoming){
-    if(!/\.(jpe?g|png|webp)$/i.test(f.name)) continue;
-    if(!files.some(x=>x.name===f.name && x.size===f.size && x.lastModified===f.lastModified)) files.push(f);
+<p class="note">
+対応形式：JPEG / PNG / WebP / GIF（形式は拡張子ではなくファイルの中身で判定します）。
+画像データは再圧縮せず、画質は変わりません。色の再現に必要なICCプロファイルは残します。
+</p>
+<ul class="note">
+<li>JPEG：EXIF・XMP・IPTC/Photoshop・コメント・MPF・C2PA等のAPP領域と、終端後の付加データを除去</li>
+<li>PNG：テキスト・EXIF・XMP・更新日時・その他の補助チャンクと、終端後の付加データを除去</li>
+<li>WebP：EXIF・XMP・不明なチャンクを除去</li>
+<li>GIF：コメント・XMP・不明なアプリケーション拡張を除去（アニメーション情報は保持）</li>
+</ul>
+<p class="note">
+注意：未知の形式で埋め込まれた情報までは判定できない場合があります。重要な画像は処理後の結果を別のツールで確認してください。
+HEIC / AVIF / TIFF などは未対応です。
+</p>
+
+<script id="core">
+'use strict';
+/* ===== 画像メタデータ除去のコア（DOM非依存） ===== */
+const TE=new TextEncoder();
+
+function concat(parts){
+  let n=0; for(const p of parts) n+=p.length;
+  const out=new Uint8Array(n); let o=0;
+  for(const p of parts){out.set(p,o);o+=p.length;}
+  return out;
+}
+function ascii(b,s,l){
+  let r=''; const e=Math.min(b.length,s+l);
+  for(let i=s;i<e;i++) r+=String.fromCharCode(b[i]);
+  return r;
+}
+function bytesEqual(a,b){
+  if(a.length!==b.length) return false;
+  for(let i=0;i<a.length;i++) if(a[i]!==b[i]) return false;
+  return true;
+}
+function be32(n){return new Uint8Array([(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255]);}
+function le16(n){return new Uint8Array([n&255,(n>>>8)&255]);}
+function le32(n){return new Uint8Array([n&255,(n>>>8)&255,(n>>>16)&255,(n>>>24)&255]);}
+function rd32le(b,o){return (b[o]|(b[o+1]<<8)|(b[o+2]<<16)|(b[o+3]<<24))>>>0;}
+
+const CRC_TABLE=(()=>{
+  const t=new Uint32Array(256);
+  for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=(c&1)?(0xedb88320^(c>>>1)):(c>>>1);t[n]=c>>>0;}
+  return t;
+})();
+function crc32(bytes){
+  let c=0xffffffff;
+  for(let i=0;i<bytes.length;i++) c=CRC_TABLE[(c^bytes[i])&255]^(c>>>8);
+  return (c^0xffffffff)>>>0;
+}
+
+/* ---- EXIF（IFD0のOrientationとGPS有無だけを読む） ---- */
+function parseExif(t){
+  const res={orientation:0,gps:false};
+  if(t.length<8) return res;
+  const le=t[0]===0x49&&t[1]===0x49;
+  if(!le&&!(t[0]===0x4d&&t[1]===0x4d)) return res;
+  const dv=new DataView(t.buffer,t.byteOffset,t.byteLength);
+  if(dv.getUint16(2,le)!==42) return res;
+  const ifd=dv.getUint32(4,le);
+  if(ifd+2>t.length) return res;
+  const n=dv.getUint16(ifd,le);
+  for(let i=0;i<n;i++){
+    const e=ifd+2+i*12; if(e+12>t.length) break;
+    const tag=dv.getUint16(e,le);
+    if(tag===0x0112&&dv.getUint16(e+2,le)===3&&dv.getUint32(e+4,le)===1) res.orientation=dv.getUint16(e+8,le);
+    else if(tag===0x8825) res.gps=true;
   }
-  render();
+  return res;
+}
+function noteExif(tiff,info){
+  const e=parseExif(tiff);
+  if(e.gps) info.gps=true;
+  if(!info.orientation&&e.orientation>=2&&e.orientation<=8) info.orientation=e.orientation;
+}
+// Orientationだけを持つ最小のTIFF/EXIF（26バイト）
+function orientationTiff(o){
+  return new Uint8Array([0x49,0x49,0x2a,0x00,0x08,0x00,0x00,0x00, 0x01,0x00,
+    0x12,0x01,0x03,0x00,0x01,0x00,0x00,0x00,o,0x00,0x00,0x00, 0x00,0x00,0x00,0x00]);
+}
+function wantsOrientation(opts,ctx){return opts.keepOrientation&&ctx.info.orientation>=2&&ctx.info.orientation<=8;}
+
+/* ---- JPEG ---- */
+function jpegDrop(m,body,ctx){
+  if(m===0xfe) return 'コメント';
+  if(m<0xe0||m>0xef) return null;                       // 画像構造のセグメントは保持
+  const id=ascii(body,0,40);
+  if(m===0xe0) return id.startsWith('JFIF\0')?null:'APP0拡張';
+  if(m===0xe2&&id.startsWith('ICC_PROFILE\0')) return null;   // 色再現に必要
+  if(m===0xee&&id.startsWith('Adobe')) return null;           // 色変換フラグ（個人情報なし）
+  if(m===0xe1&&id.startsWith('Exif\0')){noteExif(body.subarray(6),ctx.info);return 'EXIF';}
+  if(m===0xe1&&(id.startsWith('http://ns.adobe.com/xap/1.0/')||id.startsWith('http://ns.adobe.com/xmp/extension/'))) return 'XMP';
+  if(m===0xe1) return 'APP1(その他)';
+  if(m===0xe2&&id.startsWith('MPF\0')) return 'MPF';
+  if(m===0xed&&id.startsWith('Photoshop 3.0')) return 'Photoshop/IPTC';
+  if(m===0xeb) return 'APP11(JUMBF/C2PA等)';
+  return 'APP'+(m-0xe0);
+}
+function cleanJPEG(b,opts,ctx){
+  if(b.length<4||b[0]!==0xff||b[1]!==0xd8) throw Error('JPEG形式を認識できません');
+  const parts=[b.subarray(0,2)]; let p=2, ended=false, insertIdx=-1;
+  while(p<b.length){
+    if(b[p]!==0xff) throw Error('JPEGの構造が不正です');
+    while(p<b.length&&b[p]===0xff) p++;                 // フィルバイトを読み飛ばす
+    if(p>=b.length) break;
+    const m=b[p++];
+    if(m===0xd9){parts.push(new Uint8Array([0xff,0xd9]));ended=true;break;}
+    if(m===0x00||m===0xd8) throw Error('JPEGの構造が不正です');
+    if(m===0x01||(m>=0xd0&&m<=0xd7)){parts.push(new Uint8Array([0xff,m]));continue;}
+    if(p+2>b.length) throw Error('JPEGデータが不完全です');
+    const len=(b[p]<<8)|b[p+1], end=p+len;
+    if(len<2||end>b.length) throw Error('JPEGデータが不完全です');
+    if(insertIdx<0&&m!==0xe0) insertIdx=parts.length;   // JFIF(APP0)の直後に向き情報を入れる位置
+    const seg=b.subarray(p-2,end);
+    if(m===0xda){
+      // SOS: ヘッダに続く圧縮データ(次の実マーカーまで)を丸ごと保持する
+      parts.push(seg);
+      let q=end;
+      while(q<b.length){
+        if(b[q]===0xff){
+          let r=q+1; while(r<b.length&&b[r]===0xff) r++;
+          if(r>=b.length){q=b.length;break;}
+          const n=b[r];
+          if(n===0x00||(n>=0xd0&&n<=0xd7)){q=r+1;continue;}   // スタッフィング/RSTは圧縮データの一部
+          break;                                               // 実マーカー
+        }
+        q++;
+      }
+      parts.push(b.subarray(end,q));
+      p=q; continue;
+    }
+    const label=jpegDrop(m,b.subarray(p+2,end),ctx);
+    if(label===null) parts.push(seg); else ctx.removed.add(label);
+    p=end;
+  }
+  if(!ended) throw Error('JPEGが途中で切れています（終端マーカーなし）');
+  if(p<b.length) ctx.removed.add('終端後の付加データ');
+  if(wantsOrientation(opts,ctx)){
+    const body=concat([TE.encode('Exif\0\0'),orientationTiff(ctx.info.orientation)]);
+    const len=body.length+2;
+    parts.splice(insertIdx<0?parts.length:insertIdx,0,concat([new Uint8Array([0xff,0xe1,len>>8,len&255]),body]));
+    ctx.keptOrientation=true;
+  }
+  return concat(parts);
+}
+
+/* ---- PNG ---- */
+const PNG_KEEP=new Set(['IHDR','PLTE','IDAT','IEND','tRNS','gAMA','cHRM','sRGB','iCCP','sBIT','cICP','mDCV','cLLI','bKGD','hIST','pHYs','acTL','fcTL','fdAT']);
+function pngChunk(type,data){
+  const t=TE.encode(type), td=concat([t,data]);
+  return concat([be32(data.length),td,be32(crc32(td))]);
+}
+function cleanPNG(b,opts,ctx){
+  const sig=[137,80,78,71,13,10,26,10];
+  if(b.length<8||sig.some((v,i)=>b[i]!==v)) throw Error('PNG形式を認識できません');
+  const dv=new DataView(b.buffer,b.byteOffset,b.byteLength);
+  const parts=[b.subarray(0,8)]; let p=8, ended=false, first=true, insertIdx=1;
+  while(p+12<=b.length){
+    const len=dv.getUint32(p), end=p+12+len;
+    if(end>b.length) throw Error('PNGデータが不完全です');
+    const type=ascii(b,p+4,4);
+    if(first){ if(type!=='IHDR') throw Error('PNGの先頭チャンクが不正です'); first=false; }
+    if(PNG_KEEP.has(type)){
+      parts.push(b.subarray(p,end));
+      if(type==='IHDR') insertIdx=parts.length;
+    }else if(type==='eXIf'){
+      noteExif(b.subarray(p+8,p+8+len),ctx.info); ctx.removed.add('EXIF');
+    }else if(type==='tIME'){
+      ctx.removed.add('更新日時');
+    }else if(type==='tEXt'||type==='zTXt'||type==='iTXt'){
+      ctx.removed.add(ascii(b,p+8,Math.min(len,40)).startsWith('XML:com.adobe.xmp')?'XMP':'テキスト情報');
+    }else{
+      ctx.removed.add('その他('+type+')');
+    }
+    p=end;
+    if(type==='IEND'){ended=true;break;}
+  }
+  if(!ended) throw Error('PNGの終端チャンクが見つかりません');
+  if(p<b.length) ctx.removed.add('終端後の付加データ');
+  if(wantsOrientation(opts,ctx)){
+    parts.splice(insertIdx,0,pngChunk('eXIf',orientationTiff(ctx.info.orientation)));
+    ctx.keptOrientation=true;
+  }
+  return concat(parts);
+}
+
+/* ---- WebP ---- */
+const WEBP_KEEP=new Set(['VP8 ','VP8L','ALPH','ANIM','ANMF','ICCP']);
+function cleanWebP(b,opts,ctx){
+  if(b.length<12||ascii(b,0,4)!=='RIFF'||ascii(b,8,4)!=='WEBP') throw Error('WebP形式を認識できません');
+  const total=rd32le(b,4)+8;
+  if(total<12||total>b.length) throw Error('WebPデータが不完全です');
+  const parts=[b.subarray(0,12)]; let p=12, vp8x=null;
+  while(p+8<=total){
+    const type=ascii(b,p,4), len=rd32le(b,p+4), dataEnd=p+8+len;
+    if(dataEnd>total) throw Error('WebPデータが不完全です');
+    if(type==='VP8X'){
+      if(len<10) throw Error('WebPのVP8Xチャンクが不正です');
+      vp8x=b.slice(p,dataEnd);
+      vp8x[8]&=~0x0c;                                   // EXIF/XMP存在フラグを下ろす
+      parts.push(vp8x);
+      if(len&1) parts.push(new Uint8Array(1));
+    }else if(WEBP_KEEP.has(type)){
+      parts.push(b.subarray(p,dataEnd));
+      if(len&1) parts.push(new Uint8Array(1));          // パディングは正規化して付け直す
+    }else if(type==='EXIF'){
+      let t=b.subarray(p+8,dataEnd);
+      if(ascii(t,0,6)==='Exif\0\0') t=t.subarray(6);
+      noteExif(t,ctx.info); ctx.removed.add('EXIF');
+    }else if(type==='XMP '){
+      ctx.removed.add('XMP');
+    }else{
+      ctx.removed.add('その他('+type.trim()+')');
+    }
+    p=dataEnd+(len&1);
+  }
+  if(p<total) ctx.removed.add('RIFF内の余剰データ');
+  if(total<b.length) ctx.removed.add('終端後の付加データ');
+  if(vp8x&&wantsOrientation(opts,ctx)){
+    vp8x[8]|=0x08;
+    parts.push(concat([TE.encode('EXIF'),le32(26),orientationTiff(ctx.info.orientation)]));
+    ctx.keptOrientation=true;
+  }
+  const out=concat(parts), size=out.length-8;
+  out[4]=size&255;out[5]=(size>>>8)&255;out[6]=(size>>>16)&255;out[7]=(size>>>24)&255;
+  return out;
+}
+
+/* ---- GIF ---- */
+function cleanGIF(b,opts,ctx){
+  const sig=ascii(b,0,6);
+  if(sig!=='GIF87a'&&sig!=='GIF89a') throw Error('GIF形式を認識できません');
+  if(b.length<13) throw Error('GIFデータが不完全です');
+  let p=13+((b[10]&0x80)?3*(1<<((b[10]&7)+1)):0);
+  if(p>b.length) throw Error('GIFデータが不完全です');
+  const parts=[b.subarray(0,p)]; let ended=false;
+  const skipBlocks=q=>{
+    for(;;){
+      if(q>=b.length) throw Error('GIFデータが不完全です');
+      const n=b[q]; q+=1+n;
+      if(n===0) return q;
+    }
+  };
+  while(p<b.length){
+    const t=b[p];
+    if(t===0x3b){parts.push(b.subarray(p,p+1));p++;ended=true;break;}
+    if(t===0x2c){
+      if(p+10>b.length) throw Error('GIFデータが不完全です');
+      const lct=(b[p+9]&0x80)?3*(1<<((b[p+9]&7)+1)):0;
+      const q=skipBlocks(p+10+lct+1);
+      parts.push(b.subarray(p,q)); p=q; continue;
+    }
+    if(t===0x21){
+      if(p+2>b.length) throw Error('GIFデータが不完全です');
+      const label=b[p+1]; let keep=false, name='拡張';
+      if(label===0xf9) keep=true;                                   // グラフィック制御（アニメの遅延等）
+      else if(label===0xff){
+        const id=ascii(b,p+3,11);
+        keep=id==='NETSCAPE2.0'||id==='ANIMEXTS1.0'||id.startsWith('ICCRGBG1');
+        name=id==='XMP DataXMP'?'XMP':'アプリケーション拡張';
+      }else if(label===0xfe) name='コメント';
+      else if(label===0x01) name='テキスト拡張';
+      const q=skipBlocks(p+2);
+      if(keep) parts.push(b.subarray(p,q)); else ctx.removed.add(name);
+      p=q; continue;
+    }
+    throw Error('GIFの構造が不正です');
+  }
+  if(!ended) throw Error('GIFが途中で切れています');
+  if(p<b.length) ctx.removed.add('終端後の付加データ');
+  return concat(parts);
+}
+
+/* ---- 形式判定・統合 ---- */
+function detectType(b){
+  if(b.length>=3&&b[0]===0xff&&b[1]===0xd8&&b[2]===0xff) return 'jpeg';
+  if(b.length>=8&&b[0]===0x89&&b[1]===0x50&&b[2]===0x4e&&b[3]===0x47) return 'png';
+  if(b.length>=12&&ascii(b,0,4)==='RIFF'&&ascii(b,8,4)==='WEBP') return 'webp';
+  if(b.length>=6&&(ascii(b,0,6)==='GIF87a'||ascii(b,0,6)==='GIF89a')) return 'gif';
+  return null;
+}
+function unsupportedMessage(b){
+  if(ascii(b,4,4)==='ftyp'){
+    const brand=ascii(b,8,4);
+    if(/^(heic|heix|hevc|heim|heis|mif1|msf1)/.test(brand)) return '未対応形式です（HEIC/HEIF）';
+    if(/^avi[fs]/.test(brand)) return '未対応形式です（AVIF）';
+  }
+  if(ascii(b,0,4)==='II*\0'||ascii(b,0,4)==='MM\0*') return '未対応形式です（TIFF）';
+  if(ascii(b,0,2)==='BM') return '未対応形式です（BMP）';
+  return '画像形式を認識できません（未対応、または壊れたファイル）';
+}
+function runCleaner(b,type,opts){
+  const ctx={removed:new Set(),info:{gps:false,orientation:0},keptOrientation:false};
+  const data=({jpeg:cleanJPEG,png:cleanPNG,webp:cleanWebP,gif:cleanGIF})[type](b,opts,ctx);
+  return {data,ctx};
+}
+// 戻り値: {type,data,removed[],gps,orientationKept,verified}
+function processImage(buffer,opts){
+  opts=Object.assign({keepOrientation:true},opts||{});
+  const b=new Uint8Array(buffer);
+  const type=detectType(b);
+  if(!type) throw Error(unsupportedMessage(b));
+  const {data,ctx}=runCleaner(b,type,opts);
+  // 自己検証: 出力をもう一度処理して同一になる（=除去対象が残っていない）ことを確認
+  let verified=false;
+  try{ verified=bytesEqual(runCleaner(data,type,opts).data,data); }catch(e){ verified=false; }
+  return {type,data,removed:[...ctx.removed],gps:ctx.info.gps,orientationKept:ctx.keptOrientation,verified};
+}
+
+/* ---- ZIP（無圧縮） ---- */
+function dosNow(){
+  const d=new Date(), y=Math.max(1980,d.getFullYear());
+  return {t:(d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1),
+          d:((y-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate()};
+}
+// entries: [{name, data:Uint8Array|Blob, size, crc}]。大きなデータをコピーせずBlobに束ねる
+function zipBlob(entries){
+  if(entries.length>65535) throw Error('ZIPに入れられる件数の上限を超えました');
+  const parts=[], central=[], {t,d}=dosNow(); let offset=0;
+  for(const e of entries){
+    const name=TE.encode(e.name);
+    const lh=concat([le32(0x04034b50),le16(20),le16(0x0800),le16(0),le16(t),le16(d),
+      le32(e.crc),le32(e.size),le32(e.size),le16(name.length),le16(0),name]);
+    parts.push(lh,e.data);
+    central.push(concat([le32(0x02014b50),le16(20),le16(20),le16(0x0800),le16(0),le16(t),le16(d),
+      le32(e.crc),le32(e.size),le32(e.size),le16(name.length),le16(0),le16(0),
+      le16(0),le16(0),le32(0),le32(offset),name]));
+    offset+=lh.length+e.size;
+    if(offset>0xfffffff0) throw Error('ZIPのサイズ上限(4GB)を超えました。件数を減らして処理してください');
+  }
+  const cd=concat(central);
+  const eocd=concat([le32(0x06054b50),le16(0),le16(0),le16(entries.length),le16(entries.length),
+    le32(cd.length),le32(offset),le16(0)]);
+  return new Blob([...parts,cd,eocd],{type:'application/zip'});
+}
+function outputName(name,type){
+  const dot=name.lastIndexOf('.'), base=dot>0?name.slice(0,dot):name;
+  let ext=dot>0?name.slice(dot):'';
+  const want={jpeg:/^\.jpe?g$/i,png:/^\.png$/i,webp:/^\.webp$/i,gif:/^\.gif$/i}[type];
+  if(!want.test(ext)) ext={jpeg:'.jpg',png:'.png',webp:'.webp',gif:'.gif'}[type];
+  return base+'_metadata_removed'+ext;
+}
+function uniqueName(name,used){
+  const key=s=>s.toLowerCase();
+  if(!used.has(key(name))){used.add(key(name));return name;}
+  const dot=name.lastIndexOf('.'), base=dot>0?name.slice(0,dot):name, ext=dot>0?name.slice(dot):'';
+  let i=2; while(used.has(key(`${base}_${i}${ext}`))) i++;
+  const n=`${base}_${i}${ext}`; used.add(key(n)); return n;
+}
+</script>
+
+<script>
+/* ===== UI ===== */
+const $=id=>document.getElementById(id);
+const picker=$('picker'), drop=$('drop'), list=$('list'), summary=$('summary'), keepOri=$('keepOri');
+const cleanBtn=$('clean'), dlBtn=$('dl'), clearBtn=$('clear');
+const MIME={jpeg:'image/jpeg',png:'image/png',webp:'image/webp',gif:'image/gif'};
+const IMG_EXT=/\.(jpe?g|png|webp|gif|heic|heif|avif|tiff?|bmp)$/i;
+let items=[], busy=false, nextId=1, dlUrl=null, dlName='';
+
+const kb=n=>(n/1024).toFixed(1)+' KB';
+function mk(tag,cls,text){const e=document.createElement(tag); if(cls) e.className=cls; if(text!==undefined) e.textContent=text; return e;}
+
+function statusText(it){
+  if(it.error) return '';
+  if(it.working) return '処理中…';
+  if(!it.result) return '未処理';
+  const r=it.result, t=[`処理済み ${kb(it.blob.size)}`];
+  t.push(r.removed.length?'除去: '+r.removed.join('、'):'除去対象なし');
+  if(r.orientationKept) t.push('向きのみ保持');
+  return t.join(' ／ ');
+}
+function updateRow(it){
+  it.statusEl.textContent=statusText(it);
+  it.failEl.textContent=it.error?'失敗：'+it.error:'';
+  it.warnEl.textContent=it.result?[it.result.gps?'⚠ 位置情報あり→除去済み':'',it.result.verified?'':'⚠ 再検証で差異あり'].filter(Boolean).join(' '):'';
+  it.linkEl.hidden=!it.result;
+  if(it.result){it.linkEl.href=it.url; it.linkEl.download=it.outName;}
+  it.rmEl.disabled=busy;
+}
+function buildRow(it){
+  const li=mk('li');
+  it.statusEl=mk('span','status'); it.warnEl=mk('span','warn'); it.failEl=mk('span','fail');
+  it.linkEl=mk('a',null,'保存'); it.linkEl.hidden=true;
+  it.rmEl=mk('button','small','削除'); it.rmEl.addEventListener('click',()=>removeItem(it.id));
+  const act=mk('span','actions'); act.append(it.linkEl,it.rmEl);
+  li.append(mk('span','name',it.file.name),mk('span','status',kb(it.file.size)),it.statusEl,it.warnEl,it.failEl,act);
+  updateRow(it); return li;
 }
 function render(){
-  list.replaceChildren();
-  files.forEach((f,i)=>{
-    const li=document.createElement('li');
-    const name=document.createElement('span'); name.className='name'; name.textContent=f.name;
-    const size=document.createElement('span'); size.className='status'; size.textContent=`${(f.size/1024).toFixed(1)} KB`;
-    const state=document.createElement('span'); state.className='status'; state.id=`s${i}`; state.textContent='未処理';
-    li.append(name,size,state); list.append(li);
-  });
-  cleanBtn.disabled=!files.length; clearBtn.disabled=!files.length;
-  summary.textContent=files.length?`${files.length} 件の画像を選択中`:'';
+  list.replaceChildren(...items.map(buildRow));
+  const done=items.filter(x=>x.result).length;
+  cleanBtn.disabled=busy||!items.some(x=>!x.result);
+  clearBtn.disabled=busy||!items.length;
+  dlBtn.disabled=busy||!dlUrl;
+  if(!busy) summary.textContent=items.length?`${items.length} 件の画像を選択中（処理済み ${done} 件）`:'';
 }
+
+function revoke(it){ if(it.url){URL.revokeObjectURL(it.url); it.url=null;} }
+function dropDownload(){ if(dlUrl){URL.revokeObjectURL(dlUrl); dlUrl=null;} }
+function resetResults(){
+  for(const it of items){revoke(it); it.result=null; it.blob=null; it.error=null;}
+  dropDownload();
+}
+function addFiles(incoming){
+  if(busy) return;
+  for(const f of incoming){
+    if(!(f.type.startsWith('image/')||IMG_EXT.test(f.name))) continue;
+    if(items.some(x=>x.file.name===f.name&&x.file.size===f.size&&x.file.lastModified===f.lastModified)) continue;
+    items.push({id:nextId++,file:f,result:null,blob:null,url:null,error:null,working:false});
+  }
+  dropDownload(); render();
+}
+function removeItem(id){
+  if(busy) return;
+  const it=items.find(x=>x.id===id); if(it) revoke(it);
+  items=items.filter(x=>x.id!==id); dropDownload(); render();
+}
+function startDownload(url,name){
+  const a=mk('a'); a.href=url; a.download=name; document.body.append(a); a.click(); a.remove();
+}
+
 drop.addEventListener('click',()=>picker.click());
 drop.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();picker.click();}});
 picker.addEventListener('change',()=>{addFiles(picker.files);picker.value='';});
 for(const ev of ['dragenter','dragover']) drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over');});
 for(const ev of ['dragleave','drop']) drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over');});
 drop.addEventListener('drop',e=>addFiles(e.dataTransfer.files));
-clearBtn.addEventListener('click',()=>{files=[];render();});
+clearBtn.addEventListener('click',()=>{if(busy)return; resetResults(); items=[]; render();});
+keepOri.addEventListener('change',()=>{ if(busy)return; if(items.some(x=>x.result)){resetResults(); render(); summary.textContent='設定を変えたため、処理結果をリセットしました。もう一度処理してください。';} });
+dlBtn.addEventListener('click',()=>{ if(dlUrl) startDownload(dlUrl,dlName); });
 
-function u32(v){return v>>>0}
-function ascii(bytes,start,len){return String.fromCharCode(...bytes.subarray(start,start+len))}
-function concat(parts){
-  const n=parts.reduce((s,p)=>s+p.length,0), out=new Uint8Array(n); let o=0;
-  for(const p of parts){out.set(p,o);o+=p.length;} return out;
-}
-function cleanJPEG(b){
-  if(b[0]!==0xff||b[1]!==0xd8) throw Error('JPEG形式を認識できません');
-  const parts=[b.subarray(0,2)]; let p=2, inScan=false;
-  while(p<b.length){
-    if(inScan){
-      // Scan data: find the next marker, skipping stuffed 0xFF00 and restart markers.
-      let q=p;
-      while(q<b.length-1){
-        if(b[q]===0xff){
-          let r=q+1; while(r<b.length&&b[r]===0xff) r++;
-          if(r>=b.length) break;
-          const m=b[r];
-          if(m===0x00 || (m>=0xd0&&m<=0xd7)){q=r+1;continue;}
-          p=q; inScan=false; break;
-        }
-        q++;
-      }
-      if(inScan){parts.push(b.subarray(p));p=b.length;break;}
-      continue;
-    }
-    if(b[p]!==0xff){parts.push(b.subarray(p));break;}
-    let markerStart=p; while(p<b.length&&b[p]===0xff)p++;
-    if(p>=b.length) {parts.push(b.subarray(markerStart));break;}
-    const m=b[p++];
-    if(m===0xd9){parts.push(b.subarray(markerStart,p));break;}
-    if(m===0xda){ // SOS header is retained; following bytes are compressed scan data.
-      if(p+2>b.length) throw Error('JPEGデータが不完全です');
-      const len=(b[p]<<8)|b[p+1], end=p+len;
-      if(end>b.length) throw Error('JPEGデータが不完全です');
-      parts.push(b.subarray(markerStart,end)); p=end; inScan=true; continue;
-    }
-    // Standalone markers have no length.
-    if(m===0x01 || (m>=0xd0&&m<=0xd7)){parts.push(b.subarray(markerStart,p));continue;}
-    if(p+2>b.length) throw Error('JPEGデータが不完全です');
-    const len=(b[p]<<8)|b[p+1], end=p+len;
-    if(len<2||end>b.length) throw Error('JPEGデータが不完全です');
-    // APP1 (EXIF/XMP), APP12, APP13 (Photoshop/IPTC), and COM.
-    const remove=(m===0xe1||m===0xec||m===0xed||m===0xfe);
-    if(!remove) parts.push(b.subarray(markerStart,end));
-    p=end;
-  }
-  return concat(parts);
-}
-function cleanPNG(b){
-  const sig=[137,80,78,71,13,10,26,10];
-  if(sig.some((v,i)=>b[i]!==v)) throw Error('PNG形式を認識できません');
-  const parts=[b.subarray(0,8)]; let p=8, ended=false;
-  const remove=new Set(['tEXt','zTXt','iTXt','eXIf','tIME']);
-  while(p+12<=b.length){
-    const len=u32((b[p]*0x1000000)+(b[p+1]<<16)+(b[p+2]<<8)+b[p+3]);
-    const end=p+12+len;
-    if(end>b.length) throw Error('PNGデータが不完全です');
-    const type=ascii(b,p+4,4);
-    if(!remove.has(type)) parts.push(b.subarray(p,end));
-    p=end;
-    if(type==='IEND'){ended=true;break;}
-  }
-  if(!ended) throw Error('PNGの終端チャンクが見つかりません');
-  if(p<b.length) parts.push(b.subarray(p)); // preserve any trailing data rather than silently discarding it
-  return concat(parts);
-}
-function cleanWebP(b){
-  if(ascii(b,0,4)!=='RIFF'||ascii(b,8,4)!=='WEBP') throw Error('WebP形式を認識できません');
-  const parts=[b.subarray(0,12)]; let p=12;
-  while(p+8<=b.length){
-    const type=ascii(b,p,4);
-    const len=(b[p+4]|(b[p+5]<<8)|(b[p+6]<<16)|(b[p+7]<<24))>>>0;
-    const end=p+8+len+(len&1);
-    if(end>b.length) throw Error('WebPデータが不完全です');
-    if(type!=='EXIF'&&type!=='XMP ') {
-      const chunk=b.subarray(p,end).slice();
-      // VP8X feature flags: clear the EXIF and XMP presence bits.
-      if(type==='VP8X' && len>=10) chunk[8] = chunk[8] & ~0x0c;
-      parts.push(chunk);
-    }
-    p=end;
-  }
-  if(p!==b.length) throw Error('WebPデータの構造を認識できません');
-  const out=concat(parts);
-  // Update RIFF container size after removing chunks.
-  const size=out.length-8;
-  out[4]=size&255;out[5]=(size>>>8)&255;out[6]=(size>>>16)&255;out[7]=(size>>>24)&255;
-  return out;
-}
-function processBytes(buffer,name){
-  const b=new Uint8Array(buffer);
-  const ext=name.split('.').pop().toLowerCase();
-  if(ext==='jpg'||ext==='jpeg') return cleanJPEG(b);
-  if(ext==='png') return cleanPNG(b);
-  if(ext==='webp') return cleanWebP(b);
-  throw Error('未対応形式です');
-}
-function crc32(bytes){
-  let c=0xffffffff;
-  for(const b of bytes){ c^=b; for(let k=0;k<8;k++) c=(c>>>1)^((c&1)?0xedb88320:0); }
-  return (c^0xffffffff)>>>0;
-}
-function le16(n){return new Uint8Array([n&255,(n>>>8)&255]);}
-function le32(n){return new Uint8Array([n&255,(n>>>8)&255,(n>>>16)&255,(n>>>24)&255]);}
-function zipStore(entries){
-  const local=[], central=[]; let offset=0; const enc=new TextEncoder();
-  for(const entry of entries){
-    const name=enc.encode(entry.name), data=entry.data, crc=crc32(data);
-    const lh=concat([le32(0x04034b50),le16(20),le16(0x0800),le16(0),le16(0),le16(0),
-      le32(crc),le32(data.length),le32(data.length),le16(name.length),le16(0),name]);
-    local.push(lh,data);
-    const ch=concat([le32(0x02014b50),le16(20),le16(20),le16(0x0800),le16(0),le16(0),le16(0),
-      le32(crc),le32(data.length),le32(data.length),le16(name.length),le16(0),le16(0),
-      le16(0),le16(0),le32(0),le32(offset),name]);
-    central.push(ch); offset+=lh.length+data.length;
-  }
-  const lb=concat(local), cb=concat(central);
-  return concat([lb,cb,concat([le32(0x06054b50),le16(0),le16(0),le16(entries.length),
-    le16(entries.length),le32(cb.length),le32(lb.length),le16(0)])]);
-}
-function outputName(name){
-  const dot=name.lastIndexOf('.');
-  return (dot>0?name.slice(0,dot):name)+'_metadata_removed'+(dot>0?name.slice(dot):'');
-}
 cleanBtn.addEventListener('click',async()=>{
-  cleanBtn.disabled=true; clearBtn.disabled=true;
-  const results=[]; let fail=0;
-  for(let i=0;i<files.length;i++){
-    const f=files[i], state=document.getElementById(`s${i}`);
+  if(busy) return;
+  busy=true; cleanBtn.disabled=clearBtn.disabled=dlBtn.disabled=true; items.forEach(updateRow);
+  const targets=items.filter(x=>!x.result), keep=keepOri.checked;
+  let n=0;
+  for(const it of targets){
+    n++; summary.textContent=`処理中… ${n} / ${targets.length}`;
+    it.working=true; it.error=null; updateRow(it);
     try{
-      state.textContent='処理中…';
-      const result=processBytes(await f.arrayBuffer(),f.name);
-      results.push({name:outputName(f.name),data:result});
-      state.textContent=`処理済み ${(result.length/1024).toFixed(1)} KB`;
-    }catch(e){state.textContent='失敗：'+e.message;fail++;}
+      const res=processImage(await it.file.arrayBuffer(),{keepOrientation:keep});
+      it.crc=crc32(res.data); it.size=res.data.length;
+      it.blob=new Blob([res.data],{type:MIME[res.type]});     // 以降はBlobだけ保持してメモリを節約
+      it.url=URL.createObjectURL(it.blob);
+      it.outName=outputName(it.file.name,res.type);
+      delete res.data; it.result=res;
+    }catch(e){ it.error=e.message||String(e); }
+    it.working=false; updateRow(it);
     await new Promise(r=>setTimeout(r,0));
   }
-  if(results.length){
+  busy=false;
+  const done=items.filter(x=>x.result), failed=items.filter(x=>x.error).length;
+  dropDownload();
+  if(done.length){
     try{
-      const blob=new Blob([zipStore(results)],{type:'application/zip'});
-      const url=URL.createObjectURL(blob), a=document.createElement('a');
-      a.href=url;a.download='cleaned_images.zip';
-      document.body.append(a);a.click();a.remove();
-      setTimeout(()=>URL.revokeObjectURL(url),60000);
-      summary.textContent=`処理完了：成功 ${results.length} 件 / 失敗 ${fail} 件。成功分を ZIP でまとめてダウンロードしました。`;
-    }catch(e){summary.textContent=`ZIP作成に失敗しました：${e.message}`;}
-  }else{summary.textContent=`処理できる画像がありません。失敗 ${fail} 件。`;}
-  cleanBtn.disabled=!files.length; clearBtn.disabled=!files.length;
+      if(done.length===1){
+        dlUrl=URL.createObjectURL(done[0].blob); dlName=done[0].outName;
+      }else{
+        const used=new Set();
+        const zip=zipBlob(done.map(it=>({name:uniqueName(it.outName,used),data:it.blob,size:it.size,crc:it.crc})));
+        dlUrl=URL.createObjectURL(zip); dlName='cleaned_images.zip';
+      }
+      render();
+      const gps=done.filter(x=>x.result.gps).length;
+      summary.textContent=`処理完了：成功 ${done.length} 件 / 失敗 ${failed} 件`+(gps?`（うち位置情報あり ${gps} 件）`:'')
+        +'。ダウンロードが始まらない場合は「結果をダウンロード」を押してください。';
+      startDownload(dlUrl,dlName);
+    }catch(e){ render(); summary.textContent='保存用ファイルの作成に失敗しました：'+e.message; }
+  }else{ render(); summary.textContent=`処理できる画像がありません。失敗 ${failed} 件。`; }
 });
+render();
 </script>
 </body>
 </html>
