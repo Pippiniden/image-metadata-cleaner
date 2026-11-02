@@ -523,8 +523,7 @@ cleanBtn.addEventListener('click',async()=>{
       render();
       const gps=done.filter(x=>x.result.gps).length;
       summary.textContent=`処理完了：成功 ${done.length} 件 / 失敗 ${failed} 件`+(gps?`（うち位置情報あり ${gps} 件）`:'')
-        +'。ダウンロードが始まらない場合は「結果をダウンロード」を押してください。';
-      startDownload(dlUrl,dlName);
+        +'。保存するには「結果をダウンロード」を押してください。';
     }catch(e){ render(); summary.textContent='保存用ファイルの作成に失敗しました：'+e.message; }
   }else{ render(); summary.textContent=`処理できる画像がありません。失敗 ${failed} 件。`; }
 });
