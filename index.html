@@ -67,7 +67,7 @@ PNGはアルファチャンネルの隠し情報を除去するため画像デ�
 <li>GIF：コメント・XMP・不明なアプリケーション拡張を除去（アニメーション情報は保持）</li>
 </ul>
 <p class="note">
-注意：PNGのアルファLSB除去は8bit・非インターレースのRGBA/グレースケール+アルファに対応します。それ以外のアルファ付きPNGは安全のため処理を中止します。未知の形式で埋め込まれた情報までは判定できない場合があります。重要な画像は処理後の結果を別のツールで確認してください。
+注意：PNGのアルファLSB除去は8bit・非インターレースのRGBA/グレースケール+アルファに対応します。それ以外のアルファ付きPNGとアルファ付きアニメーションPNGは安全のため処理を中止します。未知の形式で埋め込まれた情報までは判定できない場合があります。重要な画像は処理後の結果を別のツールで確認してください。
 HEIC / AVIF / TIFF などは未対応です。
 </p>
 
@@ -281,6 +281,9 @@ async function cleanPNG(b,opts,ctx){
     if(first){
       if(type!=='IHDR'||len!==13) throw Error('PNGの先頭チャンクが不正です');
       ihdr=b.subarray(p+8,p+8+13); first=false;
+    }
+    if(type==='acTL'&&ihdr&&(ihdr[9]===4||ihdr[9]===6)){
+      throw Error('アルファチャンネル付きアニメーションPNGは、全フレームの隠し情報を安全に除去できないため処理を中止しました');
     }
     if(type==='IDAT'){
       if(idatInsertIdx<0) idatInsertIdx=parts.length;
