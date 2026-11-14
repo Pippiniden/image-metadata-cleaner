@@ -586,7 +586,7 @@ cleanBtn.addEventListener('click',async()=>{
     n++; summary.textContent=`処理中… ${n} / ${targets.length}`;
     it.working=true; it.error=null; updateRow(it);
     try{
-      const res=processImage(await it.file.arrayBuffer(),{keepOrientation:keep});
+      const res=await processImage(await it.file.arrayBuffer(),{keepOrientation:keep});
       it.crc=crc32(res.data); it.size=res.data.length;
       it.blob=new Blob([res.data],{type:MIME[res.type]});     // 以降はBlobだけ保持してメモリを節約
       it.url=URL.createObjectURL(it.blob);
