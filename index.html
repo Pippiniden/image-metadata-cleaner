@@ -58,12 +58,12 @@ a{color:LinkText}
 
 <p class="note">
 対応形式：JPEG / PNG / WebP / GIF（形式は拡張子ではなくファイルの中身で判定します）。
-画像データは再圧縮せず、画質は変わりません。色の再現に必要なICCプロファイルは残します。
+PNGはアルファチャンネルの隠し情報を除去するため画像データを再圧縮します（画素のRGB値は維持）。JPEG・WebP・GIFは従来どおり画像データを保持します。色の再現に必要なICCプロファイルは残します。
 </p>
 <ul class="note">
 <li>JPEG：EXIF・XMP・IPTC/Photoshop・コメント・MPF・C2PA等のAPP領域と、終端後の付加データを除去</li>
 <li>PNG：テキスト・EXIF・XMP・更新日時・その他の補助チャンクと、終端後の付加データを除去。8bit非インターレースのRGBA/グレースケール+アルファ画像は、アルファチャンネルの最下位ビットも0に正規化</li>
-<li>WebP：EXIF・XMP・不明なチャンクを除去</li>
+<li>WebP：EXIF・XMP・不明なチャンクを除去。アルファチャンネル付きWebPは隠し情報を安全に除去できないため処理を中止</li>
 <li>GIF：コメント・XMP・不明なアプリケーション拡張を除去（アニメーション情報は保持）</li>
 </ul>
 <p class="note">
@@ -333,10 +333,15 @@ function cleanWebP(b,opts,ctx){
     if(dataEnd>total) throw Error('WebPデータが不完全です');
     if(type==='VP8X'){
       if(len<10) throw Error('WebPのVP8Xチャンクが不正です');
+      if(b[p+8]&0x10) throw Error('アルファチャンネル付きWebPは、隠し生成情報を確実に除去できないため処理を中止しました。PNGに変換してから処理してください');
       vp8x=b.slice(p,dataEnd);
       vp8x[8]&=~0x0c;                                   // EXIF/XMP存在フラグを下ろす
       parts.push(vp8x);
       if(len&1) parts.push(new Uint8Array(1));
+    }else if(type==='ALPH'){
+      throw Error('アルファチャンネル付きWebPは、隠し生成情報を確実に除去できないため処理を中止しました。PNGに変換してから処理してください');
+    }else if(type==='VP8L'&&len>=5&&b[p+8]===0x2f&&(b[p+12]&0x10)){
+      throw Error('アルファチャンネル付きWebPは、隠し生成情報を確実に除去できないため処理を中止しました。PNGに変換してから処理してください');
     }else if(WEBP_KEEP.has(type)){
       parts.push(b.subarray(p,dataEnd));
       if(len&1) parts.push(new Uint8Array(1));          // パディングは正規化して付け直す
