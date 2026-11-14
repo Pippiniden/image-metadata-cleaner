@@ -62,12 +62,12 @@ a{color:LinkText}
 </p>
 <ul class="note">
 <li>JPEG：EXIF・XMP・IPTC/Photoshop・コメント・MPF・C2PA等のAPP領域と、終端後の付加データを除去</li>
-<li>PNG：テキスト・EXIF・XMP・更新日時・その他の補助チャンクと、終端後の付加データを除去</li>
+<li>PNG：テキスト・EXIF・XMP・更新日時・その他の補助チャンクと、終端後の付加データを除去。8bit非インターレースのRGBA/グレースケール+アルファ画像は、アルファチャンネルの最下位ビットも0に正規化</li>
 <li>WebP：EXIF・XMP・不明なチャンクを除去</li>
 <li>GIF：コメント・XMP・不明なアプリケーション拡張を除去（アニメーション情報は保持）</li>
 </ul>
 <p class="note">
-注意：未知の形式で埋め込まれた情報までは判定できない場合があります。重要な画像は処理後の結果を別のツールで確認してください。
+注意：PNGのアルファLSB除去は8bit・非インターレースのRGBA/グレースケール+アルファに対応します。それ以外のアルファ付きPNGは安全のため処理を中止します。未知の形式で埋め込まれた情報までは判定できない場合があります。重要な画像は処理後の結果を別のツールで確認してください。
 HEIC / AVIF / TIFF などは未対応です。
 </p>
 
@@ -209,17 +209,83 @@ function pngChunk(type,data){
   const t=TE.encode(type), td=concat([t,data]);
   return concat([be32(data.length),td,be32(crc32(td))]);
 }
-function cleanPNG(b,opts,ctx){
+async function streamDeflate(data,mode){
+  const C=mode==='inflate'?DecompressionStream:CompressionStream;
+  if(typeof C!=='function') throw Error('このブラウザはPNGのアルファ情報除去に必要な圧縮APIに対応していません');
+  const stream=new Blob([data]).stream().pipeThrough(new C('deflate'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+function paethPredictor(a,b,c){
+  const p=a+b-c, pa=Math.abs(p-a), pb=Math.abs(p-b), pc=Math.abs(p-c);
+  return pa<=pb&&pa<=pc?a:(pb<=pc?b:c);
+}
+async function clearPngAlphaLSB(idat,width,height,bitDepth,colorType,interlace,ctx){
+  // NAI stealth_pngcomp is carried in the alpha channel's least-significant bits.
+  // Process 8-bit, non-interlaced grayscale+alpha and RGBA PNGs without touching RGB samples.
+  if(colorType!==4&&colorType!==6) return null; // No explicit alpha channel to carry NAI's RGBA metadata.
+  if(bitDepth!==8||interlace!==0) throw Error('このPNGの色深度またはインターレース方式は未対応のため、安全にアルファ情報を除去できません');
+  const bpp=colorType===6?4:2, rowBytes=width*bpp, stride=rowBytes+1;
+  const inflated=await streamDeflate(idat,'inflate');
+  if(inflated.length!==stride*height) throw Error('PNGの展開サイズが不正です');
+  const raw=new Uint8Array(rowBytes*height);
+  for(let y=0;y<height;y++){
+    const src=y*stride, dst=y*rowBytes, filter=inflated[src];
+    if(filter>4) throw Error('PNGのフィルター方式が不正です');
+    for(let x=0;x<rowBytes;x++){
+      const v=inflated[src+1+x], left=x>=bpp?raw[dst+x-bpp]:0;
+      const up=y>0?raw[dst-rowBytes+x]:0;
+      const ul=(y>0&&x>=bpp)?raw[dst-rowBytes+x-bpp]:0;
+      let pred=0;
+      if(filter===1) pred=left;
+      else if(filter===2) pred=up;
+      else if(filter===3) pred=Math.floor((left+up)/2);
+      else if(filter===4) pred=paethPredictor(left,up,ul);
+      raw[dst+x]=(v+pred)&255;
+    }
+  }
+  const alphaOffset=colorType===6?3:1;
+  for(let y=0;y<height;y++){
+    const base=y*rowBytes;
+    for(let x=0;x<width;x++) raw[base+x*bpp+alphaOffset]&=0xfe;
+  }
+  const filtered=new Uint8Array(stride*height);
+  for(let y=0;y<height;y++){
+    const dst=y*stride, src=y*rowBytes;
+    const filter=inflated[y*stride];
+    filtered[dst]=filter;
+    for(let x=0;x<rowBytes;x++){
+      const v=raw[src+x], left=x>=bpp?raw[src+x-bpp]:0;
+      const up=y>0?raw[src-rowBytes+x]:0;
+      const ul=(y>0&&x>=bpp)?raw[src-rowBytes+x-bpp]:0;
+      let pred=0;
+      if(filter===1) pred=left;
+      else if(filter===2) pred=up;
+      else if(filter===3) pred=Math.floor((left+up)/2);
+      else if(filter===4) pred=paethPredictor(left,up,ul);
+      filtered[dst+1+x]=(v-pred)&255;
+    }
+  }
+  ctx.alphaLSBCleared=true;
+  return await streamDeflate(filtered,'deflate');
+}
+async function cleanPNG(b,opts,ctx){
   const sig=[137,80,78,71,13,10,26,10];
   if(b.length<8||sig.some((v,i)=>b[i]!==v)) throw Error('PNG形式を認識できません');
   const dv=new DataView(b.buffer,b.byteOffset,b.byteLength);
-  const parts=[b.subarray(0,8)]; let p=8, ended=false, first=true, insertIdx=1;
+  const parts=[b.subarray(0,8)]; let p=8, ended=false, first=true, insertIdx=1, idatInsertIdx=-1;
+  let ihdr=null; const idatParts=[];
   while(p+12<=b.length){
     const len=dv.getUint32(p), end=p+12+len;
     if(end>b.length) throw Error('PNGデータが不完全です');
     const type=ascii(b,p+4,4);
-    if(first){ if(type!=='IHDR') throw Error('PNGの先頭チャンクが不正です'); first=false; }
-    if(PNG_KEEP.has(type)){
+    if(first){
+      if(type!=='IHDR'||len!==13) throw Error('PNGの先頭チャンクが不正です');
+      ihdr=b.subarray(p+8,p+8+13); first=false;
+    }
+    if(type==='IDAT'){
+      if(idatInsertIdx<0) idatInsertIdx=parts.length;
+      idatParts.push(b.subarray(p+8,p+8+len));
+    }else if(PNG_KEEP.has(type)){
       parts.push(b.subarray(p,end));
       if(type==='IHDR') insertIdx=parts.length;
     }else if(type==='eXIf'){
@@ -235,7 +301,19 @@ function cleanPNG(b,opts,ctx){
     if(type==='IEND'){ended=true;break;}
   }
   if(!ended) throw Error('PNGの終端チャンクが見つかりません');
+  if(!ihdr||!idatParts.length) throw Error('PNGの画像データが見つかりません');
   if(p<b.length) ctx.removed.add('終端後の付加データ');
+  const width=new DataView(ihdr.buffer,ihdr.byteOffset,ihdr.byteLength).getUint32(0);
+  const height=new DataView(ihdr.buffer,ihdr.byteOffset,ihdr.byteLength).getUint32(4);
+  const bitDepth=ihdr[8], colorType=ihdr[9], interlace=ihdr[12];
+  const hasAlpha=colorType===4||colorType===6;
+  if(hasAlpha){
+    const cleaned=await clearPngAlphaLSB(concat(idatParts),width,height,bitDepth,colorType,interlace,ctx);
+    parts.splice(idatInsertIdx,0,pngChunk('IDAT',cleaned));
+  }else{
+    // RGB, grayscale and indexed PNGs have no stored per-pixel alpha channel for NAI's carrier.
+    parts.splice(idatInsertIdx,0,...idatParts.map(d=>pngChunk('IDAT',d)));
+  }
   if(wantsOrientation(opts,ctx)){
     parts.splice(insertIdx,0,pngChunk('eXIf',orientationTiff(ctx.info.orientation)));
     ctx.keptOrientation=true;
@@ -348,22 +426,22 @@ function unsupportedMessage(b){
   if(ascii(b,0,2)==='BM') return '未対応形式です（BMP）';
   return '画像形式を認識できません（未対応、または壊れたファイル）';
 }
-function runCleaner(b,type,opts){
-  const ctx={removed:new Set(),info:{gps:false,orientation:0},keptOrientation:false};
-  const data=({jpeg:cleanJPEG,png:cleanPNG,webp:cleanWebP,gif:cleanGIF})[type](b,opts,ctx);
+async function runCleaner(b,type,opts){
+  const ctx={removed:new Set(),info:{gps:false,orientation:0},keptOrientation:false,alphaLSBCleared:false};
+  const data=await ({jpeg:cleanJPEG,png:cleanPNG,webp:cleanWebP,gif:cleanGIF})[type](b,opts,ctx);
   return {data,ctx};
 }
-// 戻り値: {type,data,removed[],gps,orientationKept,verified}
-function processImage(buffer,opts){
+// 戻り値: {type,data,removed[],gps,orientationKept,alphaLSBCleared,verified}
+async function processImage(buffer,opts){
   opts=Object.assign({keepOrientation:true},opts||{});
   const b=new Uint8Array(buffer);
   const type=detectType(b);
   if(!type) throw Error(unsupportedMessage(b));
-  const {data,ctx}=runCleaner(b,type,opts);
-  // 自己検証: 出力をもう一度処理して同一になる（=除去対象が残っていない）ことを確認
+  const {data,ctx}=await runCleaner(b,type,opts);
+  // 自己検証: 出力をもう一度処理して同一になることを確認
   let verified=false;
-  try{ verified=bytesEqual(runCleaner(data,type,opts).data,data); }catch(e){ verified=false; }
-  return {type,data,removed:[...ctx.removed],gps:ctx.info.gps,orientationKept:ctx.keptOrientation,verified};
+  try{ verified=bytesEqual((await runCleaner(data,type,opts)).data,data); }catch(e){ verified=false; }
+  return {type,data,removed:[...ctx.removed],gps:ctx.info.gps,orientationKept:ctx.keptOrientation,alphaLSBCleared:ctx.alphaLSBCleared,verified};
 }
 
 /* ---- ZIP（無圧縮） ---- */
@@ -397,7 +475,8 @@ function outputName(name,type){
   let ext=dot>0?name.slice(dot):'';
   const want={jpeg:/^\.jpe?g$/i,png:/^\.png$/i,webp:/^\.webp$/i,gif:/^\.gif$/i}[type];
   if(!want.test(ext)) ext={jpeg:'.jpg',png:'.png',webp:'.webp',gif:'.gif'}[type];
-  return base+'_metadata_removed'+ext;
+  // Never carry prompt-bearing source filenames into the cleaned output.
+  return 'cleaned_image'+ext;
 }
 function uniqueName(name,used){
   const key=s=>s.toLowerCase();
@@ -427,6 +506,7 @@ function statusText(it){
   const r=it.result, t=[`処理済み ${kb(it.blob.size)}`];
   t.push(r.removed.length?'除去: '+r.removed.join('、'):'除去対象なし');
   if(r.orientationKept) t.push('向きのみ保持');
+  if(r.alphaLSBCleared) t.push('アルファLSBを正規化');
   return t.join(' ／ ');
 }
 function updateRow(it){
